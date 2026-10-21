@@ -1,7 +1,5 @@
 import { NextResponse } from 'next/server';
 
-// Ép Next.js không cache Route Handler này
-
 async function getAccessToken() {
   const clientId = process.env.SPOTIFY_CLIENT_ID;
   const clientSecret = process.env.SPOTIFY_CLIENT_SECRET;
@@ -11,7 +9,6 @@ async function getAccessToken() {
     throw new Error('Thiếu cấu hình biến môi trường Spotify trong .env.local');
   }
 
-  // Luôn lấy Access Token tươi mới từ Refresh Token trong .env.local
   const tokenResponse = await fetch('https://accounts.spotify.com/api/token', {
     method: 'POST',
     headers: {
@@ -33,40 +30,32 @@ async function getAccessToken() {
   return tokenData.access_token;
 }
 
-// Thuật toán xáo trộn thông minh Fisher-Yates Shuffle
-function smartShuffle(array: string[]) {
-  const arr = [...array];
-  for (let i = arr.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [arr[i], arr[j]] = [arr[j], arr[i]];
-  }
-  return arr;
-}
-
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-    const { selectedTracks } = body;
+    
+    const title = body.title || `NCBOTDL875 - BTS MIXTAPE (${new Date().toLocaleDateString('vi-VN')})`;
+    const description = body.description || 'Tự động tạo bởi hệ thống Mixtape Maker cho BTS & Solo.';
+    
+    // Nhận trực tiếp mảng URIs đã được xếp theo thứ tự hiển thị
+    let uris: string[] = body.trackUris || [];
 
-    if (!selectedTracks || !Array.isArray(selectedTracks) || selectedTracks.length === 0) {
+    // Fallback nếu truyền dạng tracks/selectedTracks
+    if (uris.length === 0 && (body.tracks || body.selectedTracks)) {
+      const rawTracks = body.tracks || body.selectedTracks;
+      rawTracks.forEach((t: any) => {
+        const uri = t.uri ? t.uri : `spotify:track:${t.id}`;
+        uris.push(uri);
+      });
+    }
+
+    if (!uris || uris.length === 0) {
       return NextResponse.json({ error: 'Chưa chọn bài hát nào để tạo playlist' }, { status: 400 });
     }
 
     const accessToken = await getAccessToken();
 
-    // 1. Nhân bản ID bài hát theo số lượng (repeatCount) người dùng chọn
-    let rawTrackIds: string[] = [];
-    selectedTracks.forEach((track: any) => {
-      const count = track.repeatCount || 1;
-      for (let i = 0; i < count; i++) {
-        rawTrackIds.push(track.id);
-      }
-    });
-
-    // 2. Thuật toán xáo trộn thông minh
-    const shuffledTrackIds = smartShuffle(rawTrackIds);
-
-    // 3. Tạo Playlist mới trực tiếp trên tài khoản Master (/v1/me/playlists)
+    // 1. Tạo Playlist mới trên tài khoản Master
     const playlistResponse = await fetch('https://api.spotify.com/v1/me/playlists', {
       method: 'POST',
       headers: {
@@ -74,8 +63,8 @@ export async function POST(request: Request) {
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        name: `BTS Mixtape - ${new Date().toLocaleDateString('vi-VN')} ${new Date().toLocaleTimeString('vi-VN')}`,
-        description: 'Tự động tạo bởi hệ thống Mixtape Maker cho BTS & Solo.',
+        name: title,
+        description: description,
         public: false
       }),
       cache: 'no-store'
@@ -94,9 +83,7 @@ export async function POST(request: Request) {
     const playlistId = playlistData.id;
     const playlistUrl = playlistData.external_urls.spotify;
 
-    // 4. Thêm bài hát đã xáo trộn vào Playlist (mỗi mẻ tối đa 100 bài)
-    const uris = shuffledTrackIds.map(id => `spotify:track:${id}`);
-    
+    // 2. Thêm danh sách bài hát GIỮ NGUYÊN THỨ TỰ vào Playlist (Mỗi mẻ tối đa 100 bài)
     for (let i = 0; i < uris.length; i += 100) {
       const batchUris = uris.slice(i, i + 100);
       const addResponse = await fetch(`https://api.spotify.com/v1/playlists/${playlistId}/items`, {
