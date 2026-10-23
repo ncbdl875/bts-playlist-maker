@@ -54,6 +54,13 @@ export default function Home() {
   const [creating, setCreating] = useState(false);
   const [playlistUrl, setPlaylistUrl] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const successRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (playlistUrl) {
+      successRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }, [playlistUrl]);
 
  // 1. LIVE SEARCH CÓ DEBOUNCE CACHE + ANTI-RATE LIMIT
   useEffect(() => {
@@ -228,11 +235,8 @@ export default function Home() {
 
   // 4. XUẤT PLAYLIST
   const handleConfirmExport = async () => {
-    if (previewList.length === 0) return;
-
-    if (creating) return;
+    if (previewList.length === 0 || creating || playlistUrl) return;
     setCreating(true);
-    setPlaylistUrl(null);
 
     const uris = previewList.map(t => t.uri ? t.uri : `spotify:track:${t.id}`);
 
@@ -484,18 +488,18 @@ export default function Home() {
 
             <button
               onClick={handleConfirmExport}
-              disabled={creating || previewList.length === 0}
+              disabled={creating || previewList.length === 0 || Boolean(playlistUrl)}
               className={`w-full py-4 text-base md:text-lg font-black tracking-wide ${THEME.btnSpotify} ${
-                creating ? 'opacity-50 cursor-wait' : ''
+                creating ? 'opacity-50 cursor-wait' : playlistUrl ? 'opacity-50 cursor-not-allowed' : ''
               }`}
             >
-              {creating ? 'ĐANG TẠO PLAYLIST VUI LÒNG ĐỢI...' : 'XÁC NHẬN & XUẤT LÊN SPOTIFY'}
+              {creating ? 'ĐANG TẠO PLAYLIST VUI LÒNG ĐỢI...' : playlistUrl ? '✓ PLAYLIST ĐÃ ĐƯỢC TẠO' : 'XÁC NHẬN & XUẤT LÊN SPOTIFY'}
             </button>
           </div>
         )}
 
         {playlistUrl && (
-          <div className={`${THEME.glassBox} p-8 text-center border-2 border-emerald-400/80 shadow-xl animate-fadeIn`}>
+          <div ref={successRef} role="status" aria-live="polite" className={`${THEME.glassBox} p-8 text-center border-2 border-emerald-400/80 shadow-xl animate-fadeIn scroll-mt-4`}>
             <div className="inline-flex items-center justify-center w-14 h-14 rounded-full bg-emerald-100 text-emerald-600 font-bold text-2xl mb-3">
               🎉
             </div>
