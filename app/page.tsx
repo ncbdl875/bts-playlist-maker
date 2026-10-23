@@ -29,15 +29,17 @@ type SelectedTrack = Track & {
   repeatCount: number;
 };
 
-// Kiểu dữ liệu bài hát trong Preview có thêm instanceId độc nhất
 type PreviewTrack = Track & {
   instanceId: string;
 };
+
+const clientSearchCache = new Map<string, Track[]>();
 
 export default function Home() {
   const [query, setQuery] = useState('');
   const [searchResults, setSearchResults] = useState<Track[]>([]);
   const [isSearching, setIsSearching] = useState(false);
+  const [searchError, setSearchError] = useState('');
   const [showDropdown, setShowDropdown] = useState(false);
   const searchRef = useRef<HTMLDivElement>(null);
 
@@ -53,31 +55,70 @@ export default function Home() {
   const [playlistUrl, setPlaylistUrl] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
-  // 1. LIVE SEARCH DEBOUNCE 350ms
+ // 1. LIVE SEARCH CÓ DEBOUNCE CACHE + ANTI-RATE LIMIT
   useEffect(() => {
-    if (!query.trim()) {
+    const cleanQuery = query.trim().replace(/\s+/g, ' ').toLowerCase();
+    setSearchError('');
+
+    if (!cleanQuery || cleanQuery.length < 2) {
       setSearchResults([]);
       setShowDropdown(false);
+      setIsSearching(false);
       return;
     }
+
+    if (clientSearchCache.has(cleanQuery)) {
+      const cachedData = clientSearchCache.get(cleanQuery) || [];
+      setSearchResults(cachedData);
+      setShowDropdown(true);
+      return;
+    }
+
+    const controller = new AbortController();
 
     const timer = setTimeout(async () => {
       setIsSearching(true);
       try {
-        const res = await fetch(`/api/search-bts?q=${encodeURIComponent(query)}`);
+        const res = await fetch(`/api/search-bts?q=${encodeURIComponent(cleanQuery)}`, {
+          signal: controller.signal,
+        });
         const data = await res.json();
-        if (data.success) {
-          setSearchResults(data.tracks || []);
+        
+        // NẾU API BÁO LỖI (Ví dụ 429), DỪNG LẠI KHÔNG LƯU CACHE MẢNG RỖNG
+        if (!res.ok || data.success === false) {
+          setSearchResults([]);
+          setSearchError(data.error || 'Không thể tìm kiếm lúc này.');
           setShowDropdown(true);
+          return; 
         }
-      } catch (error) {
-        console.error('Lỗi tìm kiếm live:', error);
+
+        const rawTracks = data.tracks || [];
+        const formattedTracks: Track[] = rawTracks.map((t: any) => ({
+          id: t.id || String(Math.random()),
+          name: t.name || 'Unknown Track',
+          artists: typeof t.artists === 'string' ? t.artists : 'BTS',
+          image: typeof t.image === 'string' ? t.image : '',
+          uri: t.uri || `spotify:track:${t.id}`,
+        }));
+
+        clientSearchCache.set(cleanQuery, formattedTracks);
+        if (clientSearchCache.size > 100) clientSearchCache.delete(clientSearchCache.keys().next().value!);
+        
+        setSearchResults(formattedTracks);
+        setShowDropdown(true);
+      } catch (error: any) {
+        if (error.name !== 'AbortError') {
+          console.error('Lỗi tìm kiếm live:', error);
+        }
       } finally {
         setIsSearching(false);
       }
-    }, 350);
+    }, 750);
 
-    return () => clearTimeout(timer);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
   }, [query]);
 
   useEffect(() => {
@@ -117,7 +158,7 @@ export default function Home() {
     setSelectedTracks((prev) => prev.filter((t) => t.id !== id));
   };
 
-  // 2. THUẬT TOÁN SMART SHUFFLE VỚI INSTANCE ID DỰA TRÊN THỨ TỰ
+  // 2. SMART SHUFFLE ALGORITHM
   const generateSmartShuffle = () => {
     if (selectedTracks.length === 0) return;
 
@@ -151,7 +192,6 @@ export default function Home() {
       }
     }
 
-    // Gán ID duy nhất cho từng bài để kéo thả không bị loạn
     const formattedPreviewList: PreviewTrack[] = result.map((track, idx) => ({
       ...track,
       instanceId: `${track.id}-${idx}-${Date.now()}-${Math.random()}`
@@ -161,7 +201,7 @@ export default function Home() {
     setIsPreviewMode(true);
   };
 
-  // 3. XỬ LÝ KÉO THẢ DRAG AND DROP CHUẨN XÁC
+  // 3. DRAG AND DROP
   const handleDragStart = (index: number) => {
     setDraggedIndex(index);
   };
@@ -186,33 +226,38 @@ export default function Home() {
     setPreviewList((prev) => prev.filter((_, i) => i !== index));
   };
 
-  // 4. GỬI MẢNG URIS ĐÃ SẮP XẾP SANG BACKEND
+  // 4. XUẤT PLAYLIST
   const handleConfirmExport = async () => {
     if (previewList.length === 0) return;
 
+    if (creating) return;
     setCreating(true);
     setPlaylistUrl(null);
 
-    // Lấy chính xác danh sách URI theo đúng thứ tự hiển thị hiện tại trên UI
-    const trackUris = previewList.map(t => t.uri ? t.uri : `spotify:track:${t.id}`);
+    const uris = previewList.map(t => t.uri ? t.uri : `spotify:track:${t.id}`);
 
     try {
+      let playlistSession = sessionStorage.getItem('ncbotdl875-playlist-session');
+      if (!playlistSession) {
+        playlistSession = crypto.randomUUID();
+        sessionStorage.setItem('ncbotdl875-playlist-session', playlistSession);
+      }
       const res = await fetch('/api/create-playlist', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'x-playlist-session': playlistSession },
         body: JSON.stringify({
           title: playlistTitle,
           description: playlistDescription,
-          trackUris: trackUris, // Gửi danh sách URIs đã chuẩn hóa thứ tự
+          uris: uris,
         }),
       });
 
       const data = await res.json();
-      if (res.ok && data.url) {
-        setPlaylistUrl(data.url);
+      if (res.ok && (data.playlistUrl || data.url)) {
+        setPlaylistUrl(data.playlistUrl || data.url);
       } else {
-        const detailMsg = data.details ? `\nChi tiết: ${data.details}` : '';
-        alert('Lỗi tạo playlist: ' + (data.error || 'Không xác định') + detailMsg);
+        const detailMsg = data.error || data.details || 'Không xác định';
+        alert('Lỗi tạo playlist: ' + detailMsg);
       }
     } catch (error) {
       console.error('Lỗi kết nối:', error);
@@ -255,8 +300,8 @@ export default function Home() {
               type="text"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              onFocus={() => query.trim() && setShowDropdown(true)}
-              placeholder="Nhập tên bài hát kèm tên Artist để hiện đầy đủ (VD: SWIM BTS, WHO JIMIN,...)"
+              onFocus={() => query.trim().length >= 2 && setShowDropdown(true)}
+              placeholder="Nhập tên bài hát (VD: SWIM, WHO, Seven...)"
               className="w-full p-4 bg-transparent outline-none text-purple-950 font-bold placeholder-purple-400 text-sm md:text-base"
             />
             {query && (
@@ -273,8 +318,10 @@ export default function Home() {
             <div className="absolute top-full left-0 right-0 mt-2 bg-white/95 backdrop-blur-2xl border border-purple-300 rounded-3xl shadow-2xl overflow-hidden max-h-80 overflow-y-auto custom-scrollbar z-50">
               {isSearching ? (
                 <div className="p-4 text-center text-purple-600 font-bold text-sm animate-pulse">
-                  Đang tìm BTS...
+                  Đang tìm bài hát BTS...
                 </div>
+              ) : searchError ? (
+                <div className="p-4 text-center text-red-600 font-bold text-sm">{searchError}</div>
               ) : searchResults.length > 0 ? (
                 searchResults.map((track) => (
                   <div
@@ -442,7 +489,7 @@ export default function Home() {
                 creating ? 'opacity-50 cursor-wait' : ''
               }`}
             >
-              {creating ? 'ĐỐ SPOTIFY BTS DEBUT NĂM NÀO...' : 'XÁC NHẬN & XUẤT LÊN SPOTIFY'}
+              {creating ? 'ĐANG TẠO PLAYLIST VUI LÒNG ĐỢI...' : 'XÁC NHẬN & XUẤT LÊN SPOTIFY'}
             </button>
           </div>
         )}
